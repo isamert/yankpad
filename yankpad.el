@@ -566,13 +566,39 @@ This function can be added to `hippie-expand-try-functions-list'."
       (org-show-entry)
       (org-show-subtree))))
 
-(defun yankpad--file-elements ()
+(defvar yankpad--file-elements-cache nil)
+(defun yankpad--file-elements (&optional no-cache)
   "Run `org-element-parse-buffer' on the `yankpad-file'."
-  (with-temp-buffer
-    (delay-mode-hooks
-      (org-mode)
-      (insert-file-contents yankpad-file)
-      (org-element-parse-buffer))))
+  (or
+   yankpad--file-elements-cache
+   (with-temp-buffer
+     (delay-mode-hooks
+       (org-mode)
+       (insert-file-contents yankpad-file)
+       (setq yankpad--file-elements-cache (org-element-parse-buffer))))))
+
+(defun yankpad-cache-snippets ()
+  "Add to `yankpad-file's after save hook."
+  (setq yankpad--file-elements-cache (org-element-parse-buffer)))
+
+;; TODO: This does not work due to #<killed-buffer>
+;; outputs. `async-start' actually handles it but still, not sure why.
+
+;; (defun yankpad-cache-snippets-async ()
+;;   (yankpad--async
+;;       (lambda ()
+;;         (yankpad--file-elements :no-cache))
+;;     (lambda (result)
+;;       (setq yankpad--file-elements-cache result))))
+
+;; (defun yankpad--async (fn on-finish)
+;;   (async-start
+;;    `(lambda ()
+;;       ,(async-inject-variables "^load-path$")
+;;       (require 'yankpad)
+;;       ,(async-inject-variables "^yankpad-file$")
+;;       (,fn))
+;;    on-finish))
 
 (defun yankpad--categories ()
   "Get the yankpad categories as a list."
