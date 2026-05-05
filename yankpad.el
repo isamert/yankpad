@@ -596,8 +596,13 @@ This function can be added to `hippie-expand-try-functions-list'."
   (let ((data (yankpad--file-elements)))
     (org-element-map data 'headline
       (lambda (h)
-        (when (equal (org-element-property :level h)
-                     yankpad-category-heading-level)
+        (when (and
+               (equal (org-element-property :level h)
+                      yankpad-category-heading-level)
+               (not (seq-some (lambda (tag) (seq-contains-p (org-element-property :tags h) tag))
+                              (if (boundp 'org-export-exclude-tags)
+                                  org-export-exclude-tags
+                                '("noexport")))))
           (org-element-property :raw-value h))))))
 
 (defun yankpad--global-categories ()
