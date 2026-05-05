@@ -230,6 +230,12 @@ snippets."
   :type 'boolean
   :group 'yankpad)
 
+(defcustom yankpad-exclude-buffers-regexp "^\\*.+\\*$"
+  "Regexp to check against buffer names to disable loading of yankpad snippets.
+Buffers with matching names will not load yankpad snippets."
+  :type 'string
+  :group 'yankpad)
+
 (defun yankpad-active-snippets ()
   "Get the snippets in the current category."
   (or yankpad--active-snippets (yankpad-set-active-snippets)))
@@ -738,12 +744,15 @@ Tries to get a cached version from `yankpad--cache' if there is one."
 If successful, make `yankpad-category' buffer-local.
 If no major mode category is found, it uses `yankpad-default-category',
 if that is defined in the `yankpad-file'."
-  (when (file-exists-p yankpad-file)
-    (let* ((categories (yankpad--categories))
-           (category (or (car (member (symbol-name major-mode)
-                                      categories))
-                         (car (member yankpad-default-category categories)))))
-      (when category (yankpad-set-local-category category)))))
+  (let ((name (buffer-name)))
+    (unless (or (string-prefix-p " " name)
+                (string-match-p yankpad-exclude-buffers-regexp name))
+      (when (file-exists-p yankpad-file)
+        (let* ((categories (yankpad--categories))
+               (category (or (car (member (symbol-name major-mode)
+                                          categories))
+                             (car (member yankpad-default-category categories)))))
+          (when category (yankpad-set-local-category category)))))))
 
 (add-hook 'after-change-major-mode-hook #'yankpad-local-category-to-major-mode)
 ;; Run the function when yankpad is loaded
