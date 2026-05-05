@@ -520,7 +520,6 @@ This function can be added to `hippie-expand-try-functions-list'."
   (let* ((symbol-with-bounds (yankpad-keyword-with-bounds-at-point))
          (symbol (car symbol-with-bounds))
          (bounds (cdr symbol-with-bounds))
-         (snippet-prefix (concat symbol yankpad-expand-separator))
          (possible-snippets '())
          (case-fold-search nil))
     (when (and symbol yankpad-category)
@@ -825,8 +824,7 @@ Each element is (KEY . DESCRIPTION), both strings."
 
 (defun yankpad--doc-buffer (candidate)
   "Return a buffer with detailed documentation for the Yankpad CANDIDATE."
-  (let ((snippets (yankpad-active-snippets))
-        (categories (yankpad--categories)))
+  (let ((snippets (yankpad-active-snippets)))
     (let* ((full-snippet-name
             (cl-find-if (lambda (snippet)
                           (string-prefix-p candidate (car snippet)))
