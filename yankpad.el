@@ -1,11 +1,11 @@
 ;;; yankpad.el --- Paste snippets from an org-mode file         -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2016--present Erik Sjöstrand
-;; MIT License, except company-yankpad and company-yankpad--name-or-key (GPL 3)
+;; MIT License
 
 ;; Author: Erik Sjöstrand
 ;; URL: http://github.com/Kungsgeten/yankpad
-;; Version: 2.40
+;; Version: 2.50
 ;; Keywords: abbrev convenience
 ;; Package-Requires: ((emacs "25.1"))
 
@@ -20,7 +20,7 @@
 ;; You can open your `yankpad-file' by using `yankpad-edit' (or just open it in
 ;; any other way).  Another way to add new snippets is by using
 ;; `yankpad-capture-snippet', which will add a snippet to the current
-;; `yankpad-category'.
+;; `yankpad-category'.  After editing the `yankpad-file', do M-x yankpad-reload.
 ;;
 ;; If you have yasnippet installed, yankpad will try to use it when pasting
 ;; snippets.  This means that you can use the features that yasnippet provides
@@ -50,8 +50,7 @@
 ;; `yankpad-expand-separator' (a colon by default).  If you need to change the
 ;; category, use `yankpad-set-category'.  If you want to append snippets from
 ;; another category (basically having several categories active at the same
-;; time), use `yankpad-append-category'.  If you have company-mode enabled,
-;; you can also use `company-yankpad`.
+;; time), use `yankpad-append-category'.  You can also use `yankpad-capf'.
 ;;
 ;; A quick way to add short snippets with a keyword is to add a descriptive list
 ;; to the category in your `yankpad-file'.  The key of each item in the list will be
@@ -127,9 +126,16 @@
 ;;
 ;; If you open a file, but have no category named after its major-mode, a
 ;; category named "Default" will be used instead (if you have it defined in your
-;;                                                   Yankpad). It is probably a good idea to make this category global. You can
+;; Yankpad).  It is probably a good idea to make this category global. You can
 ;; change the name of the default category by setting the variable
 ;; yankpad-default-category.
+;;
+;; * Local variables :noexport:
+;; # Headlines tagged with :noexport: are not considered categories
+;; # Adding yankpad-reload to the after-save-hook of the yankpad-file is a recommendation.
+;; # Local Variables:
+;; # eval: (add-hook 'after-save-hook #'yankpad-reload nil 'local)
+;; # End:
 
 ;;; Code:
 
@@ -232,7 +238,8 @@ snippets."
 
 (defcustom yankpad-exclude-buffers-regexp "^\\*.+\\*$"
   "Regexp to check against buffer names to disable loading of yankpad snippets.
-Buffers with matching names will not load yankpad snippets."
+Buffers with matching names will not load yankpad snippets.
+Note that `yankpad-local-category-to-major-mode' also exclude hidden buffers."
   :type 'string
   :group 'yankpad)
 
@@ -325,14 +332,16 @@ Prompts for CATEGORY if it isn't provided."
           (yankpad--add-abbrevs-from-category project-category))))))
 
 (defun yankpad-reload ()
-  "Clear the snippet cache.
+  "Clears and rebuilds snippet caches.
+Must be run after editing the `yankpad-file'.
 If `yankpad-descriptive-list-treatment' is 'abbrev,
 `yankpad-category' will be scanned for abbrevs."
   (interactive)
   (setq yankpad--active-snippets nil)
   (setq yankpad--file-cache nil)
   (setq yankpad--cache nil)
-  (yankpad--cache-all)
+  (dolist (category (yankpad--categories))
+    (yankpad--parse-snippets category))
   (when (and (eq yankpad-descriptive-list-treatment 'abbrev)
              yankpad-category)
     (yankpad-load-abbrevs)))
@@ -580,18 +589,18 @@ This function can be added to `hippie-expand-try-functions-list'."
       (org-show-entry)
       (org-show-subtree))))
 
-(defvar yankpad--file-cache nil)
+(defvar yankpad--file-cache nil "Cached org-elements of the `yankpad-file'.")
 
 (defun yankpad--file-elements ()
-  "Run `org-element-parse-buffer' on the `yankpad-file'."
-  (unless yankpad--file-cache
-    (setq yankpad--file-cache
-          (with-temp-buffer
-            (delay-mode-hooks
-              (org-mode)
-              (insert-file-contents yankpad-file)
-              (org-element-parse-buffer)))))
-  yankpad--file-cache)
+  "Get the org-elements of the `yankpad-file'.
+Run `org-element-parse-buffer' if `yankpad--file-cache' is empty."
+  (or yankpad--file-cache
+      (setq yankpad--file-cache
+            (with-temp-buffer
+              (delay-mode-hooks
+                (org-mode)
+                (insert-file-contents yankpad-file)
+                (org-element-parse-buffer))))))
 
 (defun yankpad--categories ()
   "Get the yankpad categories as a list."
@@ -686,12 +695,8 @@ removed from the snippet text."
 
 (defvar yankpad--cache nil "An alist of category-name . snippets.")
 
-(defun yankpad--cache-all ()
-  (dolist (category (yankpad--categories))
-    (yankpad--parse-snippets category))
-  yankpad--cache)
-
 (defun yankpad--parse-snippets (category-name)
+  "Parse snippets of CATEGORY-NAME and add them to `yankpad--cache'."
   (let* ((propertystring (yankpad--category-include-property category-name))
          (include (when propertystring
                     (split-string propertystring "|")))
@@ -707,7 +712,9 @@ removed from the snippet text."
                                          (format "+LEVEL=%s" (1+ yankpad-category-heading-level))
                                          'tree)))))
          (all-snippets (append snippets (cl-reduce #'append (mapcar #'yankpad--parse-snippets include)))))
-    (add-to-list 'yankpad--cache (cons category-name all-snippets))
+    (setq yankpad--cache
+          (assoc-delete-all category-name yankpad--cache #'string-equal))
+    (push (cons category-name all-snippets) yankpad--cache)
     all-snippets))
 
 (defun yankpad--snippets (category-name)
@@ -715,8 +722,8 @@ removed from the snippet text."
 Each snippet is a list (NAME TAGS SRC-BLOCKS TEXT).
 Rebuilds the cache if `yankpad--cache' isn't populated."
   (unless yankpad--cache
-    (yankpad--cache-all))
-  (alist-get category-name yankpad--cache))
+    (yankpad-reload))
+  (alist-get category-name yankpad--cache nil nil #'string-equal))
 
 ;;;###autoload
 (defun yankpad-map ()
