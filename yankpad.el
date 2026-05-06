@@ -230,6 +230,12 @@ snippets."
   :type 'boolean
   :group 'yankpad)
 
+(defcustom yankpad-exclude-buffers-regexp "^\\*.+\\*$"
+  "Regexp to check against buffer names to disable loading of yankpad snippets.
+Buffers with matching names will not load yankpad snippets."
+  :type 'string
+  :group 'yankpad)
+
 (defun yankpad-active-snippets ()
   "Get the snippets in the current category."
   (or yankpad--active-snippets (yankpad-set-active-snippets)))
@@ -320,19 +326,16 @@ Prompts for CATEGORY if it isn't provided."
 
 (defun yankpad-reload ()
   "Clear the snippet cache.
-The next try to `yankpad-insert` will reload `yankpad-file`.
-Useful to run after editing the `yankpad-file`.
-
 If `yankpad-descriptive-list-treatment' is 'abbrev,
 `yankpad-category' will be scanned for abbrevs."
   (interactive)
   (setq yankpad--active-snippets nil)
+  (setq yankpad--file-cache nil)
   (setq yankpad--cache nil)
+  (yankpad--cache-all)
   (when (and (eq yankpad-descriptive-list-treatment 'abbrev)
              yankpad-category)
     (yankpad-load-abbrevs)))
-
-(add-hook 'yankpad-switched-category-hook #'yankpad-reload)
 
 ;;;###autoload
 (defun yankpad-insert ()
@@ -520,7 +523,6 @@ This function can be added to `hippie-expand-try-functions-list'."
   (let* ((symbol-with-bounds (yankpad-keyword-with-bounds-at-point))
          (symbol (car symbol-with-bounds))
          (bounds (cdr symbol-with-bounds))
-         (snippet-prefix (concat symbol yankpad-expand-separator))
          (possible-snippets '())
          (case-fold-search nil))
     (when (and symbol yankpad-category)
@@ -578,21 +580,31 @@ This function can be added to `hippie-expand-try-functions-list'."
       (org-show-entry)
       (org-show-subtree))))
 
+(defvar yankpad--file-cache nil)
+
 (defun yankpad--file-elements ()
   "Run `org-element-parse-buffer' on the `yankpad-file'."
-  (with-temp-buffer
-    (delay-mode-hooks
-      (org-mode)
-      (insert-file-contents yankpad-file)
-      (org-element-parse-buffer))))
+  (unless yankpad--file-cache
+    (setq yankpad--file-cache
+          (with-temp-buffer
+            (delay-mode-hooks
+              (org-mode)
+              (insert-file-contents yankpad-file)
+              (org-element-parse-buffer)))))
+  yankpad--file-cache)
 
 (defun yankpad--categories ()
   "Get the yankpad categories as a list."
   (let ((data (yankpad--file-elements)))
     (org-element-map data 'headline
       (lambda (h)
-        (when (equal (org-element-property :level h)
-                     yankpad-category-heading-level)
+        (when (and
+               (equal (org-element-property :level h)
+                      yankpad-category-heading-level)
+               (not (seq-some (lambda (tag) (seq-contains-p (org-element-property :tags h) tag))
+                              (if (boundp 'org-export-exclude-tags)
+                                  org-export-exclude-tags
+                                '("noexport")))))
           (org-element-property :raw-value h))))))
 
 (defun yankpad--global-categories ()
@@ -674,28 +686,37 @@ removed from the snippet text."
 
 (defvar yankpad--cache nil "An alist of category-name . snippets.")
 
+(defun yankpad--cache-all ()
+  (dolist (category (yankpad--categories))
+    (yankpad--parse-snippets category))
+  yankpad--cache)
+
+(defun yankpad--parse-snippets (category-name)
+  (let* ((propertystring (yankpad--category-include-property category-name))
+         (include (when propertystring
+                    (split-string propertystring "|")))
+         (snippets
+          (append
+           (when (eq yankpad-descriptive-list-treatment 'snippet)
+             (mapcar (lambda (d)
+                       (list (concat (car d) yankpad-expand-separator) nil nil (cdr d)))
+                     (yankpad-category-descriptions category-name)))
+           (org-with-point-at (yankpad-category-marker category-name)
+             (cl-reduce #'append
+                        (org-map-entries #'yankpad-snippets-at-point
+                                         (format "+LEVEL=%s" (1+ yankpad-category-heading-level))
+                                         'tree)))))
+         (all-snippets (append snippets (cl-reduce #'append (mapcar #'yankpad--parse-snippets include)))))
+    (add-to-list 'yankpad--cache (cons category-name all-snippets))
+    all-snippets))
+
 (defun yankpad--snippets (category-name)
   "Get an alist of the snippets in CATEGORY-NAME.
 Each snippet is a list (NAME TAGS SRC-BLOCKS TEXT).
-Tries to get a cached version from `yankpad--cache' if there is one."
-  (or (alist-get category-name yankpad--cache)
-      (let* ((propertystring (yankpad--category-include-property category-name))
-             (include (when propertystring
-                        (split-string propertystring "|")))
-             (snippets
-              (append
-               (when (eq yankpad-descriptive-list-treatment 'snippet)
-                 (mapcar (lambda (d)
-                           (list (concat (car d) yankpad-expand-separator) nil nil (cdr d)))
-                         (yankpad-category-descriptions category-name)))
-               (org-with-point-at (yankpad-category-marker category-name)
-                 (cl-reduce #'append
-                            (org-map-entries #'yankpad-snippets-at-point
-                                             (format "+LEVEL=%s" (1+ yankpad-category-heading-level))
-                                             'tree)))))
-             (all-snippets (append snippets (cl-reduce #'append (mapcar #'yankpad--snippets include)))))
-        (add-to-list 'yankpad--cache (cons category-name all-snippets))
-        all-snippets)))
+Rebuilds the cache if `yankpad--cache' isn't populated."
+  (unless yankpad--cache
+    (yankpad--cache-all))
+  (alist-get category-name yankpad--cache))
 
 ;;;###autoload
 (defun yankpad-map ()
@@ -739,12 +760,15 @@ Tries to get a cached version from `yankpad--cache' if there is one."
 If successful, make `yankpad-category' buffer-local.
 If no major mode category is found, it uses `yankpad-default-category',
 if that is defined in the `yankpad-file'."
-  (when (file-exists-p yankpad-file)
-    (let* ((categories (yankpad--categories))
-           (category (or (car (member (symbol-name major-mode)
-                                      categories))
-                         (car (member yankpad-default-category categories)))))
-      (when category (yankpad-set-local-category category)))))
+  (let ((name (buffer-name)))
+    (unless (or (string-prefix-p " " name)
+                (string-match-p yankpad-exclude-buffers-regexp name))
+      (when (file-exists-p yankpad-file)
+        (let* ((categories (yankpad--categories))
+               (category (or (car (member (symbol-name major-mode)
+                                          categories))
+                             (car (member yankpad-default-category categories)))))
+          (when category (yankpad-set-local-category category)))))))
 
 (add-hook 'after-change-major-mode-hook #'yankpad-local-category-to-major-mode)
 ;; Run the function when yankpad is loaded
@@ -825,8 +849,7 @@ Each element is (KEY . DESCRIPTION), both strings."
 
 (defun yankpad--doc-buffer (candidate)
   "Return a buffer with detailed documentation for the Yankpad CANDIDATE."
-  (let ((snippets (yankpad-active-snippets))
-        (categories (yankpad--categories)))
+  (let ((snippets (yankpad-active-snippets)))
     (let* ((full-snippet-name
             (cl-find-if (lambda (snippet)
                           (string-prefix-p candidate (car snippet)))
