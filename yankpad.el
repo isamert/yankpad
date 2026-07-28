@@ -228,6 +228,12 @@ A snippet is a list with the following elements:
 (defvar-local yankpad--automatic-category-generation -1
   "Cache generation when `yankpad-category' was selected automatically.")
 
+(defvar yankpad--major-mode-override nil
+  "Dynamically bound major mode used for automatic category lookup.")
+
+(defvar yankpad--category-override nil
+  "Dynamically bound category used by context-sensitive commands.")
+
 (defvar yankpad--file-cache nil
   "Cached Org elements of `yankpad-file'.")
 
@@ -288,10 +294,15 @@ Note that `yankpad-local-category-to-major-mode' also exclude hidden buffers."
   :type 'string
   :group 'yankpad)
 
+(defun yankpad--current-category ()
+  "Return the category effective in the current command context."
+  (or yankpad--category-override yankpad-category))
+
 (defun yankpad--active-snippets-valid-p ()
   "Return non-nil when the current buffer's active cache is valid."
   (and (= yankpad--active-snippets-generation yankpad--cache-generation)
-       (equal yankpad--active-snippets-category yankpad-category)
+       (equal yankpad--active-snippets-category
+              (yankpad--current-category))
        (eq yankpad--active-snippets-category-local-p
            (local-variable-p 'yankpad-category))
        (equal yankpad--active-snippets-file yankpad-file)))
@@ -347,8 +358,42 @@ AUTOMATIC-SOURCE records the internal automatic selector, if any."
   category)
 
 (defsubst yankpad-major-mode-category ()
-  "Return a category name based on the major mode."
-  (symbol-name major-mode))
+  "Return a category name based on the effective major mode."
+  (symbol-name (or yankpad--major-mode-override major-mode)))
+
+(defun yankpad--category-for-mode (mode)
+  "Return the Yankpad category matching MODE, or the fallback category."
+  (let ((categories (yankpad--categories)))
+    (or (car (member (symbol-name mode) categories))
+        (car (member yankpad-default-category categories)))))
+
+(defun yankpad--org-src-edit-buffer-p ()
+  "Return non-nil in a buffer created to edit an Org source block."
+  (and (bound-and-true-p org-src-mode)
+       (boundp 'org-src--beg-marker)
+       (markerp org-src--beg-marker)
+       (marker-buffer org-src--beg-marker)))
+
+(defun yankpad--org-src-block-mode-at-point ()
+  "Return the language mode when point is inside an Org source block."
+  (when (and (derived-mode-p 'org-mode)
+             (org-in-src-block-p t))
+    (let* ((element (org-element-context))
+           (language (and (eq (org-element-type element) 'src-block)
+                          (org-element-property :language element))))
+      (when language
+        (require 'org-src)
+        (org-src-get-lang-mode language)))))
+
+(defmacro yankpad--with-org-src-block-context (&rest body)
+  "Evaluate BODY using the mode category of an Org source block at point."
+  (declare (indent 0) (debug t))
+  (let ((mode (make-symbol "mode")))
+    `(let* ((,mode (yankpad--org-src-block-mode-at-point))
+            (yankpad--major-mode-override ,mode)
+            (yankpad--category-override
+             (and ,mode (yankpad--category-for-mode ,mode))))
+       ,@body)))
 
 (defsubst yankpad-projectile-category ()
   "Return a category name based on the projectile project name."
@@ -367,13 +412,14 @@ Try automatic major-mode selection before prompting."
   ;; This also handles buffers whose major mode was initialized before
   ;; Yankpad was loaded.  An explicitly buffer-local nil value opts out of
   ;; automatic selection, as documented for file-local variables.
-  (unless (local-variable-p 'yankpad-category)
+  (unless (or yankpad--category-override
+              (local-variable-p 'yankpad-category))
     (yankpad-local-category-to-major-mode))
-  (or yankpad-category (yankpad-set-category)))
+  (or (yankpad--current-category) (yankpad-set-category)))
 
 (defun yankpad--append-category-snippets (category)
   "Append snippets from CATEGORY to the current buffer's active cache."
-  (unless (equal category yankpad-category)
+  (unless (equal category (yankpad--current-category))
     (dolist (snippet (yankpad--snippets category))
       (add-to-list 'yankpad--active-snippets snippet t))))
 
@@ -401,32 +447,34 @@ variables since automatic selection took place."
                   yankpad--automatic-category-generation -1)))))))
 
 (defun yankpad-set-active-snippets ()
-  "Set snippets active for `yankpad-category' in the current buffer.
+  "Set snippets active for the effective category in the current buffer.
 Also append implicit and global categories."
-  (yankpad--refresh-automatic-category)
+  (unless yankpad--category-override
+    (yankpad--refresh-automatic-category))
   (yankpad--ensure-category)
-  (unless (member yankpad-category (yankpad--categories))
-    (user-error "Current Yankpad category `%s' was not found"
-                yankpad-category))
-  ;; Copy the list spine so appending categories can never modify the parsed
-  ;; category cache.
-  (setq yankpad--active-snippets
-        (copy-sequence (yankpad--snippets yankpad-category)))
-  (when (local-variable-p 'yankpad-category)
-    (thread-last (mapcar #'funcall yankpad-auto-category-functions)
-       (delq nil)
-       (seq-intersection (yankpad--categories))
-       (mapc #'yankpad--append-category-snippets)))
-  (mapc #'yankpad--append-category-snippets (yankpad--global-categories))
-  (setq yankpad--active-snippets-generation yankpad--cache-generation
-        yankpad--active-snippets-category yankpad-category
-        yankpad--active-snippets-category-local-p
-        (local-variable-p 'yankpad-category)
-        yankpad--active-snippets-file yankpad-file)
-  (when yankpad--automatic-category-source
-    (setq yankpad--automatic-category-generation yankpad--cache-generation
-          yankpad--automatic-category-value yankpad-category))
-  yankpad--active-snippets)
+  (let ((category (yankpad--current-category)))
+    (unless (member category (yankpad--categories))
+      (user-error "Current Yankpad category `%s' was not found" category))
+    ;; Copy the list spine so appending categories can never modify the parsed
+    ;; category cache.
+    (setq yankpad--active-snippets
+          (copy-sequence (yankpad--snippets category)))
+    (when (or yankpad--category-override
+              (local-variable-p 'yankpad-category))
+      (thread-last (mapcar #'funcall yankpad-auto-category-functions)
+                   (delq nil)
+                   (seq-intersection (yankpad--categories))
+                   (mapc #'yankpad--append-category-snippets)))
+    (mapc #'yankpad--append-category-snippets (yankpad--global-categories))
+    (setq yankpad--active-snippets-generation yankpad--cache-generation
+          yankpad--active-snippets-category category
+          yankpad--active-snippets-category-local-p
+          (local-variable-p 'yankpad-category)
+          yankpad--active-snippets-file yankpad-file)
+    (when yankpad--automatic-category-source
+      (setq yankpad--automatic-category-generation yankpad--cache-generation
+            yankpad--automatic-category-value yankpad-category))
+    yankpad--active-snippets))
 
 (defun yankpad-append-category (category)
   "Add snippets from CATEGORY into the list of active snippets.
@@ -482,8 +530,9 @@ If `yankpad-descriptive-list-treatment' is `abbrev', scan
   "Insert an entry from the yankpad.
 Uses `yankpad-category', and prompts for it if it isn't set."
   (interactive)
-  (yankpad--ensure-category)
-  (yankpad-insert-from-current-category))
+  (yankpad--with-org-src-block-context
+   (yankpad--ensure-category)
+   (yankpad-insert-from-current-category)))
 
 (defun yankpad-snippet-text (snippet)
   "Get text from SNIPPET, as a string.
@@ -654,56 +703,57 @@ Only works if the symbol is found in the first matching group of
 
 This function can be added to `hippie-expand-try-functions-list'."
   (interactive)
-  (when (called-interactively-p 'any)
-    (yankpad--ensure-category))
-  (let* ((symbol-with-bounds (yankpad-keyword-with-bounds-at-point))
-         (symbol (car symbol-with-bounds))
-         (bounds (cdr symbol-with-bounds))
-         (possible-snippets '())
-         (case-fold-search nil))
-    (when (and symbol yankpad-category)
-      (catch 'loop
-        (mapc
-         (lambda (snippet)
-           ;; See if there's an expand regex
-           (if-let ((regex (cdr (assoc "YP_EXPAND_REGEX" (nth 4 snippet)))))
-               (when (string-match (concat "\\b" regex "\\b") symbol)
-                 (let ((match (cddr (match-data)))
-                       (snippet (copy-sequence snippet))
-                       strings)
-                   (while match
-                     (push (substring symbol (pop match) (pop match)) strings))
-                   (setf (nth 3 snippet)
-                         (apply #'format (nth 3 snippet) (reverse strings)))
-                   (delete-region (car bounds) (cdr bounds))
-                   (yankpad--run-snippet snippet)
-                   (throw 'loop snippet)))
+  (yankpad--with-org-src-block-context
+   (when (called-interactively-p 'any)
+     (yankpad--ensure-category))
+   (let* ((symbol-with-bounds (yankpad-keyword-with-bounds-at-point))
+          (symbol (car symbol-with-bounds))
+          (bounds (cdr symbol-with-bounds))
+          (possible-snippets '())
+          (case-fold-search nil))
+     (when (and symbol (yankpad--current-category))
+       (catch 'loop
+         (mapc
+          (lambda (snippet)
+            ;; See if there's an expand regex
+            (if-let ((regex (cdr (assoc "YP_EXPAND_REGEX" (nth 4 snippet)))))
+                (when (string-match (concat "\\b" regex "\\b") symbol)
+                  (let ((match (cddr (match-data)))
+                        (snippet (copy-sequence snippet))
+                        strings)
+                    (while match
+                      (push (substring symbol (pop match) (pop match)) strings))
+                    (setf (nth 3 snippet)
+                          (apply #'format (nth 3 snippet) (reverse strings)))
+                    (delete-region (car bounds) (cdr bounds))
+                    (yankpad--run-snippet snippet)
+                    (throw 'loop snippet)))
 
-             ;; Otherwise look for expand keyword
-             (when (member symbol (butlast (split-string (car snippet) yankpad-expand-separator)))
-               (delete-region (car bounds) (cdr bounds))
-               (yankpad--run-snippet snippet)
-               (throw 'loop snippet))
+              ;; Otherwise look for expand keyword
+              (when (member symbol (butlast (split-string (car snippet) yankpad-expand-separator)))
+                (delete-region (car bounds) (cdr bounds))
+                (yankpad--run-snippet snippet)
+                (throw 'loop snippet))
 
-             ;; Collect suffix matches
-             (let ((snippet-keyword (car (split-string (car snippet) yankpad-expand-separator))))
-               (when (string-suffix-p snippet-keyword symbol)
-                 (add-to-list 'possible-snippets (cons snippet-keyword snippet))))))
-         (yankpad-active-snippets))
+              ;; Collect suffix matches
+              (let ((snippet-keyword (car (split-string (car snippet) yankpad-expand-separator))))
+                (when (string-suffix-p snippet-keyword symbol)
+                  (add-to-list 'possible-snippets (cons snippet-keyword snippet))))))
+          (yankpad-active-snippets))
 
-        ;; Find the longest suffix match and apply it, if we have one
-        (when possible-snippets
-          (let* ((snippet-info (seq-reduce
-                                (lambda (acc it)
-                                  (if (> (length (car it)) (length acc))
-                                      it acc))
-                                possible-snippets ""))
-                 (snippet (cdr snippet-info))
-                 (snippet-keyword (car snippet-info)))
-            (delete-region (- (cdr bounds) (length snippet-keyword)) (cdr bounds))
-            (yankpad--run-snippet (cdr snippet-info))
-            (throw 'loop snippet)))
-        nil))))
+         ;; Find the longest suffix match and apply it, if we have one
+         (when possible-snippets
+           (let* ((snippet-info (seq-reduce
+                                 (lambda (acc it)
+                                   (if (> (length (car it)) (length acc))
+                                       it acc))
+                                 possible-snippets ""))
+                  (snippet (cdr snippet-info))
+                  (snippet-keyword (car snippet-info)))
+             (delete-region (- (cdr bounds) (length snippet-keyword)) (cdr bounds))
+             (yankpad--run-snippet (cdr snippet-info))
+             (throw 'loop snippet)))
+         nil)))))
 
 ;;;###autoload
 (defun yankpad-edit ()
@@ -1008,17 +1058,22 @@ If successful, make `yankpad-category' buffer-local.
 If no major mode category is found, it uses `yankpad-default-category',
 if that is defined in the `yankpad-file'."
   (let ((name (buffer-name)))
-    (unless (or (string-prefix-p " " name)
-                (string-match-p yankpad-exclude-buffers-regexp name))
+    (unless (and (not (yankpad--org-src-edit-buffer-p))
+                 (or (string-prefix-p " " name)
+                     (string-match-p yankpad-exclude-buffers-regexp name)))
       (when (file-exists-p yankpad-file)
         (let* ((categories (yankpad--categories))
-               (category (or (car (member (symbol-name major-mode)
+               (category (or (car (member (yankpad-major-mode-category)
                                           categories))
                              (car (member yankpad-default-category categories)))))
           (when category
             (yankpad-set-local-category category 'major-mode)))))))
 
 (add-hook 'after-change-major-mode-hook #'yankpad-local-category-to-major-mode)
+(with-eval-after-load 'org-src
+  ;; `org-src-mode' is enabled after the language major mode, so the regular
+  ;; major-mode hook has already skipped its normally excluded buffer name.
+  (add-hook 'org-src-mode-hook #'yankpad-local-category-to-major-mode))
 ;; Run the function when yankpad is loaded
 (yankpad-local-category-to-major-mode)
 
