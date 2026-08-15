@@ -228,6 +228,9 @@ A snippet is a list with the following elements:
 (defvar-local yankpad--automatic-category-generation -1
   "Cache generation when `yankpad-category' was selected automatically.")
 
+(defvar-local yankpad--automatic-category-file nil
+  "Absolute `yankpad-file' used for automatic category selection.")
+
 (defvar yankpad--major-mode-override nil
   "Dynamically bound major mode used for automatic category lookup.")
 
@@ -340,7 +343,8 @@ Prompt for CATEGORY when it is nil."
     (setq yankpad-category category
           yankpad--automatic-category-source nil
           yankpad--automatic-category-value nil
-          yankpad--automatic-category-generation -1))
+          yankpad--automatic-category-generation -1
+          yankpad--automatic-category-file nil))
   (yankpad--invalidate-active-snippets)
   (run-hooks 'yankpad-switched-category-hook)
   yankpad-category)
@@ -352,7 +356,9 @@ AUTOMATIC-SOURCE records the internal automatic selector, if any."
   (setq yankpad--automatic-category-source automatic-source
         yankpad--automatic-category-value (and automatic-source category)
         yankpad--automatic-category-generation
-        (if automatic-source yankpad--cache-generation -1))
+        (if automatic-source yankpad--cache-generation -1)
+        yankpad--automatic-category-file
+        (and automatic-source (expand-file-name yankpad-file)))
   (yankpad--invalidate-active-snippets)
   (run-hooks 'yankpad-switched-category-hook)
   category)
@@ -431,9 +437,15 @@ variables since automatic selection took place."
     (if (not (equal yankpad-category yankpad--automatic-category-value))
         (setq yankpad--automatic-category-source nil
               yankpad--automatic-category-value nil
-              yankpad--automatic-category-generation -1)
-      (when (< yankpad--automatic-category-generation
-               yankpad--cache-generation)
+              yankpad--automatic-category-generation -1
+              yankpad--automatic-category-file nil)
+      ;; File- and directory-local variables are applied after the major-mode
+      ;; hook.  Re-evaluate an automatic choice when they select another
+      ;; Yankpad file, rather than retaining a category from the old file.
+      (when (or (< yankpad--automatic-category-generation
+                   yankpad--cache-generation)
+                (not (equal yankpad--automatic-category-file
+                            (expand-file-name yankpad-file))))
         (let ((source yankpad--automatic-category-source))
           (unless
               (pcase source
@@ -444,7 +456,8 @@ variables since automatic selection took place."
             (kill-local-variable 'yankpad-category)
             (setq yankpad--automatic-category-source nil
                   yankpad--automatic-category-value nil
-                  yankpad--automatic-category-generation -1)))))))
+                  yankpad--automatic-category-generation -1
+                  yankpad--automatic-category-file nil)))))))
 
 (defun yankpad-set-active-snippets ()
   "Set snippets active for the effective category in the current buffer.
