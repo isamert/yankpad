@@ -352,25 +352,47 @@ Prompt for CATEGORY when it is nil."
 (defun yankpad-set-local-category (category &optional automatic-source)
   "Set `yankpad-category' to CATEGORY locally.
 AUTOMATIC-SOURCE records the internal automatic selector, if any."
-  (setq-local yankpad-category category)
-  (setq yankpad--automatic-category-source automatic-source
-        yankpad--automatic-category-value (and automatic-source category)
-        yankpad--automatic-category-generation
-        (if automatic-source yankpad--cache-generation -1)
-        yankpad--automatic-category-file
-        (and automatic-source (expand-file-name yankpad-file)))
-  (yankpad--invalidate-active-snippets)
-  (run-hooks 'yankpad-switched-category-hook)
+  (let ((unchanged (and automatic-source
+                        (local-variable-p 'yankpad-category)
+                        (equal yankpad-category category)
+                        (eq yankpad--automatic-category-source automatic-source))))
+    (setq-local yankpad-category category)
+    (setq yankpad--automatic-category-source automatic-source
+          yankpad--automatic-category-value (and automatic-source category)
+          yankpad--automatic-category-generation
+          (if automatic-source yankpad--cache-generation -1)
+          yankpad--automatic-category-file
+          (and automatic-source (expand-file-name yankpad-file)))
+    (unless unchanged
+      (yankpad--invalidate-active-snippets)
+      (run-hooks 'yankpad-switched-category-hook)))
   category)
 
+(defun yankpad--explicit-local-category-p ()
+  "Return non-nil if automatic selection must preserve the local category."
+  (and (local-variable-p 'yankpad-category)
+       (or (null yankpad--automatic-category-source)
+           (not (equal yankpad-category yankpad--automatic-category-value)))))
+
 (defsubst yankpad-major-mode-category ()
-  "Return a category name based on the effective major mode."
-  (symbol-name (or yankpad--major-mode-override major-mode)))
+  "Return a category name based on the effective major mode.
+Prefer the mode itself, then its nearest derived-mode ancestor."
+  (yankpad--mode-category (or yankpad--major-mode-override major-mode)
+                         (yankpad--categories)))
+
+(defun yankpad--mode-category (mode categories)
+  "Return the nearest category for MODE or its ancestors in CATEGORIES."
+  (let (seen category)
+    (while (and mode (not category) (not (memq mode seen)))
+      (push mode seen)
+      (setq category (car (member (symbol-name mode) categories))
+            mode (get mode 'derived-mode-parent)))
+    category))
 
 (defun yankpad--category-for-mode (mode)
   "Return the Yankpad category matching MODE, or the fallback category."
   (let ((categories (yankpad--categories)))
-    (or (car (member (symbol-name mode) categories))
+    (or (yankpad--mode-category mode categories)
         (car (member yankpad-default-category categories)))))
 
 (defun yankpad--org-src-edit-buffer-p ()
@@ -1071,16 +1093,14 @@ If successful, make `yankpad-category' buffer-local.
 If no major mode category is found, it uses `yankpad-default-category',
 if that is defined in the `yankpad-file'."
   (let ((name (buffer-name)))
-    (unless (and (not (yankpad--org-src-edit-buffer-p))
-                 (or (string-prefix-p " " name)
-                     (string-match-p yankpad-exclude-buffers-regexp name)))
+    (unless (or (yankpad--explicit-local-category-p)
+                (and (not (yankpad--org-src-edit-buffer-p))
+                     (or (string-prefix-p " " name)
+                         (string-match-p yankpad-exclude-buffers-regexp name))))
       (when (file-exists-p yankpad-file)
-        (let* ((categories (yankpad--categories))
-               (category (or (car (member (yankpad-major-mode-category)
-                                          categories))
-                             (car (member yankpad-default-category categories)))))
-          (when category
-            (yankpad-set-local-category category 'major-mode)))))))
+        (when-let* ((category (yankpad--category-for-mode
+                             (or yankpad--major-mode-override major-mode))))
+          (yankpad-set-local-category category 'major-mode))))))
 
 (add-hook 'after-change-major-mode-hook #'yankpad-local-category-to-major-mode)
 (with-eval-after-load 'org-src
@@ -1093,10 +1113,11 @@ if that is defined in the `yankpad-file'."
 (defun yankpad-local-category-to-projectile ()
   "Try to change `yankpad-category' to match the `projectile-project-name'.
 If successful, make `yankpad-category' buffer-local."
-  (when (and (require 'projectile nil t)
+  (when (and (not (yankpad--explicit-local-category-p))
+             (require 'projectile nil t)
              (file-exists-p yankpad-file))
     (when-let* ((category (car (member (projectile-project-name)
-                                       (yankpad--categories)))))
+                                      (yankpad--categories)))))
       (yankpad-set-local-category category 'projectile))))
 
 (eval-after-load "projectile"
